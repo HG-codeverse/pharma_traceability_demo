@@ -1,0 +1,25 @@
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+node_modules/
+.env
+.env.*
+!.env.example
+*.db
+*.sqlite
+*.sqlite3
+instance/
+.pytest_cache/
+.coverage
+
+# Local deployment configuration
+deployment.json
+
+# Local backup files
+app.py_backup
+qr_backup.txt
+
+# Editor-specific settings
+.vscode/
+
