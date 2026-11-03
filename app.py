@@ -738,6 +738,7 @@ def build_traceability_text(medicine, events, chain_id=None):
 
 
 
+
 @app.route("/medicine/<int:medicine_id>")
 def medicine(medicine_id):
     with connect_db() as con:
@@ -750,10 +751,25 @@ def medicine(medicine_id):
             return "Medicine not found.", 404
 
         events = con.execute("""
-            SELECT * FROM events WHERE batch_id = %s
+            SELECT * FROM events
+            WHERE batch_id = %s
             ORDER BY id
         """, (medicine_id,)).fetchall()
-    
+
+    # Generate a QR containing ONLY the public verification URL.
+    base_url = os.environ.get(
+        "PUBLIC_BASE_URL",
+        request.url_root.rstrip("/")
+    ).rstrip("/")
+
+    qr_url = base_url + url_for(
+        "public_verify",
+        batch=item["batch"]
+    )
+
+    qr_image = generate_qr_code(qr_url)
+    local_ok = verify_local_chain(medicine_id)
+
     try:
         chain = get_chain_status(medicine_id)
         chain_error = None
@@ -761,46 +777,17 @@ def medicine(medicine_id):
         chain = None
         chain_error = str(error)
 
-    chain_id = chain["chain_id"] if chain else None
-    if chain_id is None and DEPLOYMENT_FILE.exists():
-        try:
-            deployment = json.loads(
-                DEPLOYMENT_FILE.read_text(encoding="utf-8")
-            )
-            chain_id = deployment.get("chain_id")
-        except (OSError, json.JSONDecodeError):
-            chain_id = None
-
-    chain_events = {
-        event["event_hash"].lower(): event
-        for event in chain["events"]
-    } if chain else {}
-    qr_events = []
-    for event in events:
-        qr_event = dict(event)
-        chain_hash = qr_event.get("chain_hash")
-        if chain_hash:
-            chain_event = chain_events.get(str(chain_hash).lower())
-            if chain_event:
-                qr_event["recorded_by"] = chain_event["recorded_by"]
-        qr_events.append(qr_event)
-
-    qr_text = build_traceability_text(item, qr_events, chain_id=chain_id)
-    qr_image = None
-    qr_error = None
-    try:
-        qr_image = generate_qr_code(qr_text)
-    except ValueError as error:
-        qr_error = str(error)
-    local_ok = verify_local_chain(medicine_id)
-
     return render_template_string(BASE_STYLES + """
     <header class="topbar">
       <nav class="nav">
-        <a class="brand" href="/"><span class="brand-mark">✚</span><span>PharmaTrace<small>Supply chain assurance</small></span></a>
-        <a class="nav-link" href="/">←&nbsp; All batches</a>
+        <a class="brand" href="/">
+          <span class="brand-mark">✚</span>
+          <span>PharmaTrace<small>Supply chain assurance</small></span>
+        </a>
+        <a class="nav-link" href="/">← All batches</a>
       </nav>
     </header>
+
     <main class="page">
       <section class="medicine-head">
         <div>
@@ -812,93 +799,302 @@ def medicine(medicine_id):
             <span class="meta-chip"><strong>Expiry</strong>&nbsp; {{ item['expiry'] }}</span>
           </div>
         </div>
-        <a class="button button-secondary" href="/medicine/{{ item['id'] }}/add-event">＋ Add supply-chain event</a>
+
+        <a class="button button-secondary"
+           href="/medicine/{{ item['id'] }}/add-event">
+           ＋ Add supply-chain event
+        </a>
       </section>
 
       <section class="detail-grid">
         <article class="card card-pad qr-card">
-          <span class="eyebrow">Portable record</span>
-          <h2 style="margin-top:8px">Scan for traceability</h2>
-          {% if qr_image %}
-            <div class="qr-frame">
-              <img src="data:image/png;base64,{{ qr_image }}" alt="QR code containing the medicine traceability record as plain text">
-            </div>
-          {% else %}
-            <p class="notice notice-error">{{ qr_error }}</p>
-          {% endif %}
-          <p class="small-copy">This code contains a plain-text snapshot, not a website link. Scanning alone does not prove medicine authenticity.</p>
+          <span class="eyebrow">Public verification</span>
+          <h2 style="margin-top:8px">Scan to view medicine record</h2>
+
+          <div class="qr-frame">
+            <img src="data:image/png;base64,{{ qr_image }}"
+                 alt="QR code linking to public medicine verification page">
+          </div>
+
+          <p class="small-copy">
+            This QR code contains only a website link.
+            Scan it to open the public, read-only traceability record.
+          </p>
+
+          <p class="small-copy" style="margin-top:10px; overflow-wrap:anywhere">
+            <a href="{{ qr_url }}" target="_blank">Open public verification page</a>
+          </p>
         </article>
 
         <article class="card card-pad">
           <span class="eyebrow">Record integrity</span>
           <h2 style="margin-top:8px">Verification status</h2>
+
           <div class="audit-row">
-            <span class="audit-label">PostgreSQL audit</span>
-            <span class="status-pill {{ '' if local_ok else 'status-error' }}">{{ 'VALID' if local_ok else 'FAILED / NO EVENTS' }}</span>
+            <span class="audit-label">Database event-chain integrity</span>
+            <span class="status-pill {{ '' if local_ok else 'status-error' }}">
+              {{ 'VALID' if local_ok else 'FAILED / NO EVENTS' }}
+            </span>
           </div>
+
           {% if chain %}
             <div class="audit-row">
-              <span class="audit-label">Blockchain network</span>
+              <span class="audit-label">Live blockchain connection</span>
               <span class="status-pill">Connected</span>
             </div>
-            <div class="audit-row"><span class="audit-label">Network chain ID</span><strong>{{ chain['chain_id'] }}</strong></div>
-            <div class="audit-row"><span class="audit-label">Batch registered on-chain</span><strong>{{ chain['registered'] }}</strong></div>
-            <div class="audit-row"><span class="audit-label">On-chain event count</span><strong>{{ chain['count'] }}</strong></div>
+            <div class="audit-row">
+              <span class="audit-label">Network chain ID</span>
+              <strong>{{ chain['chain_id'] }}</strong>
+            </div>
+            <div class="audit-row">
+              <span class="audit-label">Batch registered on-chain</span>
+              <strong>{{ chain['registered'] }}</strong>
+            </div>
+            <div class="audit-row">
+              <span class="audit-label">On-chain event count</span>
+              <strong>{{ chain['count'] }}</strong>
+            </div>
           {% else %}
-            <div class="notice notice-error" style="margin-top:16px">Blockchain unavailable: {{ chain_error }}</div>
+            <div class="notice notice-error" style="margin-top:16px">
+              Live blockchain verification is currently unavailable.
+              Stored blockchain references are shown in the event history.
+            </div>
           {% endif %}
         </article>
       </section>
 
-      {% if chain and chain['events'] %}
-        <section style="margin-bottom:26px">
-          <div class="section-heading"><h2>Blockchain event history</h2><span class="muted">{{ chain['events']|length }} events</span></div>
-          <div class="event-list">
-          {% for e in chain['events'] %}
-            <article class="event-card">
-              <div class="event-top">
-                <div><h3>{{ e['status'] }}</h3><p class="event-location">{{ e['location'] }}</p></div>
-                <span class="status-pill">On-chain</span>
-              </div>
-              <span class="event-time">{{ e['timestamp'] }}</span>
-              <span class="hash">Previous hash: {{ e['previous_hash'] }}</span>
-              <span class="hash">Event hash: {{ e['event_hash'] }}</span>
-              <span class="hash">Recorded by: {{ e['recorded_by'] }}</span>
-            </article>
-          {% endfor %}
-          </div>
-        </section>
-      {% endif %}
-
       <section>
-        <div class="section-heading"><h2>PostgreSQL event history</h2><span class="muted">{{ events|length }} events</span></div>
+        <div class="section-heading">
+          <h2>Supply-chain journey</h2>
+          <span class="muted">{{ events|length }} recorded events</span>
+        </div>
+
         {% if events %}
           <div class="event-list">
-          {% for e in events %}
-            <article class="event-card">
-              <div class="event-top">
-                <div><h3>{{ e['status'] }}</h3><p class="event-location">{{ e['location'] }}</p></div>
-                <span class="status-pill">Recorded</span>
-              </div>
-              <span class="event-time">{{ e['timestamp'] }}</span>
-              <span class="hash">Transaction: {{ e['tx_hash'] or 'Not recorded' }}</span>
-              <span class="hash">Block: {{ e['block_number'] or 'Not recorded' }}</span>
-            </article>
-          {% endfor %}
+            {% for e in events %}
+              <article class="event-card">
+                <div class="event-top">
+                  <div>
+                    <h3>{{ e['status'] }}</h3>
+                    <p class="event-location">{{ e['location'] }}</p>
+                  </div>
+                  <span class="status-pill">Recorded</span>
+                </div>
+
+                <span class="event-time">{{ e['timestamp'] }}</span>
+
+                <span class="hash">
+                  Transaction hash: {{ e['tx_hash'] or 'Not recorded' }}
+                </span>
+                <span class="hash">
+                  Block number: {{ e['block_number'] or 'Not recorded' }}
+                </span>
+                <span class="hash">
+                  Event hash: {{ e['event_hash'] or 'Not recorded' }}
+                </span>
+                <span class="hash">
+                  Previous hash: {{ e['previous_hash'] or 'Not recorded' }}
+                </span>
+                <span class="hash">
+                  Blockchain event hash: {{ e['chain_hash'] or 'Not recorded' }}
+                </span>
+              </article>
+            {% endfor %}
           </div>
         {% else %}
-          <div class="card empty-state"><p>No local events have been recorded for this batch.</p></div>
+          <div class="card empty-state">
+            <p>No supply-chain events have been recorded for this batch.</p>
+          </div>
         {% endif %}
       </section>
-      <div class="page-actions">
-        <a class="button" href="/medicine/{{ item['id'] }}/add-event">＋ Add supply-chain event</a>
-        <a class="button button-secondary" href="/">← Back to dashboard</a>
-      </div>
-    </main>
-    """, item=item, events=events, local_ok=local_ok,
-         chain=chain, chain_error=chain_error, qr_image=qr_image,
-         qr_error=qr_error)
 
+      <p class="footer-note">
+        PharmaTrace · Public read-only traceability record.
+        A QR code alone does not guarantee medicine authenticity.
+      </p>
+    </main>
+    """,
+    item=item,
+    events=events,
+    qr_image=qr_image,
+    qr_url=qr_url,
+    local_ok=local_ok,
+    chain=chain,
+    chain_error=chain_error)
+
+
+@app.route("/verify/<batch>")
+def public_verify(batch):
+    with connect_db() as con:
+        item = con.execute(
+            "SELECT * FROM medicines WHERE batch = %s",
+            (batch,)
+        ).fetchone()
+
+        if item is None:
+            return render_template_string(BASE_STYLES + """
+                <main class="page">
+                  <div class="card empty-state">
+                    <span class="empty-icon">✕</span>
+                    <h1 style="font-size:32px">Record not found</h1>
+                    <p>No medicine record exists for this batch number.</p>
+                    <p class="muted">Please check the QR code or batch number.</p>
+                  </div>
+                </main>
+            """), 404
+
+        events = con.execute("""
+            SELECT * FROM events
+            WHERE batch_id = %s
+            ORDER BY id
+        """, (item["id"],)).fetchall()
+
+    local_ok = verify_local_chain(item["id"])
+
+    # Attempt live blockchain verification.
+    # If the network is unavailable, the public record still loads.
+    try:
+        chain = get_chain_status(item["id"])
+    except Exception:
+        chain = None
+
+    return render_template_string(BASE_STYLES + """
+    <header class="topbar">
+      <nav class="nav">
+        <a class="brand" href="#">
+          <span class="brand-mark">✚</span>
+          <span>PharmaTrace<small>Public medicine verification</small></span>
+        </a>
+        <span class="status-pill">Read-only record</span>
+      </nav>
+    </header>
+
+    <main class="page">
+      <section class="hero">
+        <div class="hero-copy">
+          <span class="eyebrow">Public traceability record</span>
+          <h1>{{ item['name'] }}</h1>
+          <p class="lede">
+            View the recorded supply-chain journey and available
+            verification evidence for this medicine batch.
+          </p>
+        </div>
+      </section>
+
+      <section class="card card-pad" style="margin-bottom:20px">
+        <span class="eyebrow">Medicine information</span>
+        <h2 style="margin-top:8px">Batch details</h2>
+
+        <div class="audit-row">
+          <span class="audit-label">Medicine name</span>
+          <strong>{{ item['name'] }}</strong>
+        </div>
+        <div class="audit-row">
+          <span class="audit-label">Batch number</span>
+          <strong>{{ item['batch'] }}</strong>
+        </div>
+        <div class="audit-row">
+          <span class="audit-label">Manufacturer</span>
+          <strong>{{ item['manufacturer'] }}</strong>
+        </div>
+        <div class="audit-row">
+          <span class="audit-label">Expiry date</span>
+          <strong>{{ item['expiry'] }}</strong>
+        </div>
+      </section>
+
+      <section class="card card-pad" style="margin-bottom:20px">
+        <span class="eyebrow">Record integrity</span>
+        <h2 style="margin-top:8px">Verification status</h2>
+
+        <div class="audit-row">
+          <span class="audit-label">Database event-chain integrity</span>
+          <span class="status-pill {{ '' if local_ok else 'status-error' }}">
+            {{ 'VALID' if local_ok else 'FAILED / NO EVENTS' }}
+          </span>
+        </div>
+
+        {% if chain %}
+          <div class="audit-row">
+            <span class="audit-label">Live blockchain connection</span>
+            <span class="status-pill">Connected</span>
+          </div>
+          <div class="audit-row">
+            <span class="audit-label">Network chain ID</span>
+            <strong>{{ chain['chain_id'] }}</strong>
+          </div>
+          <div class="audit-row">
+            <span class="audit-label">Batch registered on-chain</span>
+            <strong>{{ chain['registered'] }}</strong>
+          </div>
+          <div class="audit-row">
+            <span class="audit-label">On-chain event count</span>
+            <strong>{{ chain['count'] }}</strong>
+          </div>
+        {% else %}
+          <div class="notice notice-error" style="margin-top:16px">
+            Live blockchain connection is unavailable.
+            Blockchain transaction references stored with the record
+            are displayed below, but are not independently verified live.
+          </div>
+        {% endif %}
+      </section>
+
+      <section>
+        <div class="section-heading">
+          <h2>Supply-chain journey</h2>
+          <span class="muted">{{ events|length }} recorded events</span>
+        </div>
+
+        {% if events %}
+          <div class="event-list">
+            {% for e in events %}
+              <article class="event-card">
+                <div class="event-top">
+                  <div>
+                    <h3>{{ e['status'] }}</h3>
+                    <p class="event-location">{{ e['location'] }}</p>
+                  </div>
+                  <span class="status-pill">Recorded</span>
+                </div>
+
+                <span class="event-time">{{ e['timestamp'] }}</span>
+                <span class="hash">
+                  Transaction hash: {{ e['tx_hash'] or 'Not recorded' }}
+                </span>
+                <span class="hash">
+                  Block number: {{ e['block_number'] or 'Not recorded' }}
+                </span>
+                <span class="hash">
+                  Event hash: {{ e['event_hash'] or 'Not recorded' }}
+                </span>
+                <span class="hash">
+                  Previous hash: {{ e['previous_hash'] or 'Not recorded' }}
+                </span>
+                <span class="hash">
+                  Blockchain event hash: {{ e['chain_hash'] or 'Not recorded' }}
+                </span>
+              </article>
+            {% endfor %}
+          </div>
+        {% else %}
+          <div class="card empty-state">
+            <p>No supply-chain events have been recorded for this batch.</p>
+          </div>
+        {% endif %}
+      </section>
+
+      <p class="footer-note">
+        PharmaTrace · Transparent pharmaceutical supply-chain records.
+        This record is informational and does not independently certify
+        the physical medicine or its contents.
+      </p>
+    </main>
+    """,
+    item=item,
+    events=events,
+    local_ok=local_ok,
+    chain=chain)
 
 @app.route("/medicine/<int:medicine_id>/add-event",
            methods=["GET", "POST"])
